@@ -23,12 +23,14 @@
 
 # Libraries
 *.lib
+!/**/hoDll.lib
 *.a
 *.la
 *.lo
 
 # Shared objects (inc. Windows DLLs)
 *.dll
+!/**/hoDll.dll
 *.so
 *.so.*
 *.dylib

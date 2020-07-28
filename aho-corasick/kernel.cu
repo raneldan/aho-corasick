@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "include/hoDll.h"
 
 //definitions
 #define NUM_BLOCKS 1
@@ -37,7 +38,6 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 
 int main()
 {
-    
     const size_t PATTERN_LENGTH = 10;
     char searchphase[N];
     char pattern[PATTERN_LENGTH];
@@ -58,7 +58,7 @@ int main()
     // Allocate  one−dimensional and two−dimensional  arrays  in  the  global  memoryof  the  device  using  the  cudaMalloc() and cudaMallocPitch()functions  r e s p e c t i v e l y
     allocateData();
 
-    computeOnDevice();
+    //computeOnDevice();
     
     calculateResult();
 
@@ -95,14 +95,14 @@ void computeOnDevice(char* h_searchphase, char* h_tries, const size_t phase_size
     unsigned int* d_out;
 
     h_out = static_cast<unsigned int*>(malloc(out_size));
-    cudaMalloc(d_searchphase, phase_size);
+    /*cudaMalloc(d_searchphase, phase_size);
     cudaMalloc(d_tries, tries_size);
-    cudaMalloc(d_out, out_size);
+    cudaMalloc(d_out, out_size);*/
 
     cudaMemcpy(d_searchphase, h_searchphase, phase_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_tries, h_tries, tries_size, cudaMemcpyHostToDevice);
 
-    AhoCorasickKernel << NUM_BLOCKS, BLOCK_DIM >> (d_searchphase, d_tries, d_out);
+    //AhoCorasickKernel << NUM_BLOCKS, BLOCK_DIM >> (d_searchphase, d_tries, d_out);
 
     cudaMemcpy(h_out, d_out, out_size, cudaMemcpyDeviceToHost);
 }
