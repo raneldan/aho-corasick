@@ -4,25 +4,49 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <time.h>
+
 #include "include/hoDll.h"
 
 //definitions
 #define NUM_BLOCKS 1
 #define BLOCK_DIM 1024
-#define N 1000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
+#define N 1000000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
 #define M 10 // count of patterns
 #define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
 #define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + M - 1) // amount of characters proccessed by a thread
 #define S_MEMSIZE *
 
+#define trie_state uint32_t
+#define SIGMA_SIZE 52 // small case and big case english letters.
+
+//define list of patterns
+const char* P[M] = {
+    "consectetur",
+    "est",
+    "egestasAliquam",
+    "elementum",
+    "ultricies",
+    "vehicula",
+    "tortor",
+    "inauditum",
+    "inquam" ,
+    "aut"
+};
+
+// calculate maximum number of states, should be the sum of lengths of patterns.
+const size_t MAX_NUM_OF_STATES = 78;
+
+
 //function definitions
 void preprocessing();
-void formatTries();
 void allocateData();
 void computeOnDevice(char*, char*, const size_t, const size_t);
 __device__ void AhoCorasickKernel(char*, char*, unsigned int*);
 void calculateResult();
-void computeGold();
+void computeGold(const char*, const char**);
 void compareWithGold();
 
 
@@ -36,11 +60,23 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
     }
 }
 
+/*void callback_match_pos(void* arg, struct aho_match_t* m)
+{
+    char* text = (char*)arg;
+
+    printf("match text:");
+    for (unsigned int i = m->pos; i < (m->pos + m->len); i++)
+    {
+        printf("%c", text[i]);
+    }
+
+    printf(" (match id: %d position: %llu length: %d)\n", m->id, m->pos, m->len);
+}*/
+
 int main()
 {
-    const size_t PATTERN_LENGTH = 10;
     char searchphase[N];
-    char pattern[PATTERN_LENGTH];
+    char pattern[M];
     
     // input
     FILE* fp;
@@ -49,35 +85,76 @@ int main()
     fgets(searchphase, N, fp);
     fclose(fp);
 
-    // Execute  the  preprocessing  phase  of  the  algorithms
+    // Execute  the  preprocessing  phase  of  the  algorithm
     preprocessing();
 
-    // Where  relevant  represent  t r i e s  using  arrays
-    formatTries();
-
+    // Where  relevant  represent  tries  using  arrays
+    
     // Allocate  one−dimensional and two−dimensional  arrays  in  the  global  memoryof  the  device  using  the  cudaMalloc() and cudaMallocPitch()functions  r e s p e c t i v e l y
-    allocateData();
+    //allocateData();
 
     //computeOnDevice();
     
-    calculateResult();
+    //calculateResult();
 
-    computeGold();
+    computeGold(searchphase, P);
 
-    compareWithGold();
+    //compareWithGold();
 
     // free memory
+    //aho_destroy(&aho);
 }
 
 void preprocessing()
 {
-    int i;
+    // implementation inspired by https://www.geeksforgeeks.org/aho-corasick-algorithm-pattern-searching/
+    trie_state State_transition[MAX_NUM_OF_STATES][SIGMA_SIZE]; // corespondes to goto function. row = current state, col = character in Σ, value = next state.
+    trie_state State_supply[MAX_NUM_OF_STATES]; //corespondes to supply function. col = current state, value = supply state + is it final state.
+    trie_state State_output[MAX_NUM_OF_STATES]; //corespondes to output function. col = state, value = 1 if word ends at this state, 0 otherwise.
 
-}
+    memset(State_output, 0, sizeof State_output);
+    memset(State_transition, UINT32_MAX, sizeof State_transition);
 
-void formatTries()
-{
-    int i;
+    int states = 1;
+
+    for (int i = 0; i < M; ++i)
+    {
+        const char* word = P[i];
+        trie_state currentState = 0;
+
+        for (int j = 0; j < strlen(word); j++)
+        {
+            int ch = word[j] - 'a';
+            if (State_transition[currentState][ch] == UINT32_MAX)
+            {
+                State_transition[currentState][ch] = states++;
+            }
+
+            currentState = State_transition[currentState][ch];
+        }
+
+        State_output[currentState] |= (1 << i);
+    }
+
+    for (int ch = 0; ch < SIGMA_SIZE; ++ch)
+    {
+        if (State_transition[0][ch] == UINT32_MAX)
+            State_transition[0][ch] = 0;
+    }
+
+    memset(State_supply, UINT32_MAX, sizeof State_supply);
+    queue<trie_state> q;
+
+    for (int ch = 0; ch < SIGMA_SIZE; ++ch)
+    {
+        if (State_transition[0][ch] != 0)
+        {
+            State_supply[State_transition[0][ch]] = 0;
+            q.push(State_transition[0][ch]);
+
+            //TODO continue this
+        }
+    }
 }
 
 void allocateData()
@@ -125,10 +202,36 @@ void calculateResult()
     int i;
 }
 
-void computeGold()
+void computeGold(const char* target, const char* P[M])
 {
+    clock_t start, end;
+
+    struct ahocorasick aho;
+    int id[M] = { 0 };
+    //char* target = "Lorem ipsum dolor sit amet, consectetur brown elit. Proin vehicula brown egestas. Aliquam a dui tincidunt, elementum sapien in, ultricies lacus. Phasellus congue, sapien nec";
+    aho_init(&aho);
+
+    id[0] = aho_add_match_text(&aho, P[0], strlen(P[0]));
+    id[1] = aho_add_match_text(&aho, P[1], strlen(P[1]));
+    id[2] = aho_add_match_text(&aho, P[2], strlen(P[2]));
+    id[3] = aho_add_match_text(&aho, P[3], strlen(P[3]));
+    id[4] = aho_add_match_text(&aho, P[4], strlen(P[4]));
+    id[5] = aho_add_match_text(&aho, P[5], strlen(P[5]));
+    id[6] = aho_add_match_text(&aho, P[6], strlen(P[6]));
+    id[7] = aho_add_match_text(&aho, P[7], strlen(P[7]));
+    id[8] = aho_add_match_text(&aho, P[8], strlen(P[8]));
+    id[9] = aho_add_match_text(&aho, P[9], strlen(P[9]));
+
+    aho_create_trie(&aho);
+    //aho_register_match_callback(&aho, callback_match_pos, (void*)searchphase);
+
     // use aho-corasick algorithm from https://github.com/morenice/ahocorasick
-    int i;
+    start = clock();
+    printf("total match CPU:%u\n", aho_findtext(&aho, target, strlen(target)));
+    end = clock();
+
+    double milliseconds = ((double)(end - start)) / double(CLOCKS_PER_SEC);
+    printf("Execution Time Gold CPU (sec): %lf\n", milliseconds);
 }
 
 void compareWithGold()
