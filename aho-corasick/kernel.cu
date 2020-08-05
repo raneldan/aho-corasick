@@ -8,13 +8,14 @@
 #include <string.h>
 #include <time.h>
 
+#include "simpleQ.h"
 #include "include/hoDll.h"
 
 //definitions
 #define NUM_BLOCKS 1
 #define BLOCK_DIM 1024
 #define N 1000000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
-#define M 10 // count of patterns
+#define NUM_OF_PATTERNS 10 // count of patterns
 #define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
 #define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + M - 1) // amount of characters proccessed by a thread
 #define S_MEMSIZE *
@@ -23,7 +24,7 @@
 #define SIGMA_SIZE 52 // small case and big case english letters.
 
 //define list of patterns
-const char* P[M] = {
+const char* P[NUM_OF_PATTERNS] = {
     "consectetur",
     "est",
     "egestasAliquam",
@@ -60,6 +61,7 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
     }
 }
 
+
 /*void callback_match_pos(void* arg, struct aho_match_t* m)
 {
     char* text = (char*)arg;
@@ -73,10 +75,14 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
     printf(" (match id: %d position: %llu length: %d)\n", m->id, m->pos, m->len);
 }*/
 
+trie_state State_transition[MAX_NUM_OF_STATES][SIGMA_SIZE]; // corespondes to goto function. row = current state, col = character in Σ, value = next state.
+trie_state State_supply[MAX_NUM_OF_STATES]; //corespondes to supply function. col = current state, value = supply state + is it final state.
+trie_state State_output[MAX_NUM_OF_STATES]; //corespondes to output function. col = state, value = 1 if word ends at this state, 0 otherwise.
+
 int main()
 {
     char searchphase[N];
-    char pattern[M];
+    char pattern[NUM_OF_PATTERNS];
     
     // input
     FILE* fp;
@@ -108,16 +114,13 @@ int main()
 void preprocessing()
 {
     // implementation inspired by https://www.geeksforgeeks.org/aho-corasick-algorithm-pattern-searching/
-    trie_state State_transition[MAX_NUM_OF_STATES][SIGMA_SIZE]; // corespondes to goto function. row = current state, col = character in Σ, value = next state.
-    trie_state State_supply[MAX_NUM_OF_STATES]; //corespondes to supply function. col = current state, value = supply state + is it final state.
-    trie_state State_output[MAX_NUM_OF_STATES]; //corespondes to output function. col = state, value = 1 if word ends at this state, 0 otherwise.
 
     memset(State_output, 0, sizeof State_output);
     memset(State_transition, UINT32_MAX, sizeof State_transition);
 
     int states = 1;
 
-    for (int i = 0; i < M; ++i)
+    for (int i = 0; i < NUM_OF_PATTERNS; ++i)
     {
         const char* word = P[i];
         trie_state currentState = 0;
@@ -125,8 +128,7 @@ void preprocessing()
         for (int j = 0; j < strlen(word); j++)
         {
             int ch = word[j] - 'a';
-            if (State_transition[currentState][ch] == UINT32_MAX)
-            {
+            if (State_transition[currentState][ch] == UINT32_MAX) {
                 State_transition[currentState][ch] = states++;
             }
 
@@ -138,12 +140,16 @@ void preprocessing()
 
     for (int ch = 0; ch < SIGMA_SIZE; ++ch)
     {
-        if (State_transition[0][ch] == UINT32_MAX)
+        if (State_transition[0][ch] == UINT32_MAX) {
             State_transition[0][ch] = 0;
+        }
     }
 
     memset(State_supply, UINT32_MAX, sizeof State_supply);
-    queue<trie_state> q;
+    SIMPLEQ_HEAD(q, trie_state);
+    //SIMPLEQ_INIT(q);
+    //SIMPLEQ_HEAD_INITIALIZER(q);
+    //queue<trie_state> q;
 
     for (int ch = 0; ch < SIGMA_SIZE; ++ch)
     {
@@ -155,6 +161,19 @@ void preprocessing()
             //TODO continue this
         }
     }
+}
+
+
+int findNextState(int currentState, char nextInput)
+{
+    int result = currentState;
+    int ch = nextInput - 'a';
+
+    // If goto is not defined, use failure function 
+    while (State_transition[result][ch] == -1) {
+        result = State_supply[result];
+    }
+    return State_transition[result][ch];
 }
 
 void allocateData()
@@ -191,7 +210,7 @@ __device__ void AhoCorasickKernel(char* d_searchphase, char* d_tries, unsigned i
     
     // define start and stop auxilary variables.
     size_t start, stop; //used to indicate the input string positions where the search phase begins and ends respectively
-    unsigned int overlap = M - 1; // To ensure the correctness of the results, m−1 overlapping characters are used per thread
+    unsigned int overlap = NUM_OF_PATTERNS - 1; // To ensure the correctness of the results, m−1 overlapping characters are used per thread
     start = (blockId * N) / NUM_BLOCKS + (N * threadId) / (NUM_BLOCKS * blockDim.x);
     stop = start + N / (NUM_BLOCKS * blockDim.x) + overlap;
 
@@ -202,12 +221,12 @@ void calculateResult()
     int i;
 }
 
-void computeGold(const char* target, const char* P[M])
+void computeGold(const char* target, const char* P[NUM_OF_PATTERNS])
 {
     clock_t start, end;
 
     struct ahocorasick aho;
-    int id[M] = { 0 };
+    int id[NUM_OF_PATTERNS] = { 0 };
     //char* target = "Lorem ipsum dolor sit amet, consectetur brown elit. Proin vehicula brown egestas. Aliquam a dui tincidunt, elementum sapien in, ultricies lacus. Phasellus congue, sapien nec";
     aho_init(&aho);
 
@@ -238,3 +257,5 @@ void compareWithGold()
 {
     int i;
 }
+
+
