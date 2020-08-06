@@ -21,6 +21,11 @@
 #define S_MEMSIZE *
 
 #define trie_state uint32_t
+typedef	struct _trie_state_queue_element {
+    SIMPLEQ_ENTRY(_trie_state_queue_element) entries;
+    trie_state state;
+} trie_state_queue_element;
+
 #define SIGMA_SIZE 52 // small case and big case english letters.
 
 //define list of patterns
@@ -42,7 +47,7 @@ const size_t MAX_NUM_OF_STATES = 78;
 
 
 //function definitions
-void preprocessing();
+int preprocessing();
 void allocateData();
 void computeOnDevice(char*, char*, const size_t, const size_t);
 __device__ void AhoCorasickKernel(char*, char*, unsigned int*);
@@ -79,6 +84,7 @@ trie_state State_transition[MAX_NUM_OF_STATES][SIGMA_SIZE]; // corespondes to go
 trie_state State_supply[MAX_NUM_OF_STATES]; //corespondes to supply function. col = current state, value = supply state + is it final state.
 trie_state State_output[MAX_NUM_OF_STATES]; //corespondes to output function. col = state, value = 1 if word ends at this state, 0 otherwise.
 
+
 int main()
 {
     char searchphase[N];
@@ -111,7 +117,7 @@ int main()
     //aho_destroy(&aho);
 }
 
-void preprocessing()
+int preprocessing()
 {
     // implementation inspired by https://www.geeksforgeeks.org/aho-corasick-algorithm-pattern-searching/
 
@@ -146,21 +152,47 @@ void preprocessing()
     }
 
     memset(State_supply, UINT32_MAX, sizeof State_supply);
-    SIMPLEQ_HEAD(q, trie_state);
-    //SIMPLEQ_INIT(q);
-    //SIMPLEQ_HEAD_INITIALIZER(q);
-    //queue<trie_state> q;
+    SIMPLEQ_HEAD(state_queue, _trie_state_queue_element) q = SIMPLEQ_HEAD_INITIALIZER(q);
 
     for (int ch = 0; ch < SIGMA_SIZE; ++ch)
     {
         if (State_transition[0][ch] != 0)
         {
+            trie_state_queue_element tsqe;
             State_supply[State_transition[0][ch]] = 0;
-            q.push(State_transition[0][ch]);
+            tsqe.state = State_transition[0][ch];
+            SIMPLEQ_INSERT_TAIL(&q, &tsqe, entries);
 
             //TODO continue this
         }
     }
+
+    while (!SIMPLEQ_EMPTY(&q))
+    {
+        trie_state state = SIMPLEQ_FIRST(&q)->state;
+        SIMPLEQ_REMOVE_HEAD(&q, entries);
+
+        for (int ch = 0; ch <= SIGMA_SIZE; ++ch)
+        {
+            if (State_transition[state][ch] != -1)
+            {
+                trie_state failure = State_supply[state];
+                while (State_transition[failure][ch] == -1)
+                    failure = State_supply[failure];
+
+                failure = State_transition[failure][ch];
+                State_supply[State_transition[state][ch]] = failure;
+
+                State_output[State_transition[state][ch]] |= State_output[failure];
+
+                trie_state_queue_element tsqe;
+                tsqe.state = State_transition[state][ch];
+                SIMPLEQ_INSERT_TAIL(&q, &tsqe, entries);
+            }
+        }
+    }
+
+    return states;
 }
 
 
