@@ -12,27 +12,37 @@
 #include "include/hoDll.h"
 
 //definitions
+#define SIMPLE_EXAMPLE
+#define DEBUG
+
 #define NUM_BLOCKS 1
 #define BLOCK_DIM 1024
 #define N 1000000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
-#define NUM_OF_PATTERNS 10 // count of patterns
 #define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
 #define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + M - 1) // amount of characters proccessed by a thread
 #define S_MEMSIZE *
 
 #define trie_state uint32_t
-typedef	struct _trie_state_queue_element {
-    SIMPLEQ_ENTRY(_trie_state_queue_element) entries;
-    trie_state state;
-} trie_state_queue_element;
 
-#define SIGMA_SIZE 52 // small case and big case english letters.
+#define SIGMA_SIZE ('z' - 'a' + 1) // small case english letters.
 
 //define list of patterns
+#ifdef SIMPLE_EXAMPLE
+#define NUM_OF_PATTERNS 4 // count of patterns
+const char* P[NUM_OF_PATTERNS] = {
+    "he",
+    "she",
+    "his",
+    "hers"
+};
+// calculate maximum number of states, should be the sum of lengths of patterns.
+const size_t MAX_NUM_OF_STATES = 12;
+#else
+#define NUM_OF_PATTERNS 10 // count of patterns
 const char* P[NUM_OF_PATTERNS] = {
     "consectetur",
     "est",
-    "egestasAliquam",
+    "egestasaliquam",
     "elementum",
     "ultricies",
     "vehicula",
@@ -41,10 +51,16 @@ const char* P[NUM_OF_PATTERNS] = {
     "inquam" ,
     "aut"
 };
-
 // calculate maximum number of states, should be the sum of lengths of patterns.
-const size_t MAX_NUM_OF_STATES = 78;
+const size_t MAX_NUM_OF_STATES = 79;
+#endif //SIMPLE_EXAMPLE
 
+// queue defenitions for calculation of supply function
+typedef	struct _trie_state_queue_entry {
+    SIMPLEQ_ENTRY(_trie_state_queue_entry) entries;
+    trie_state state;
+};
+SIMPLEQ_HEAD(queue_head_type, _trie_state_queue_entry) head;
 
 //function definitions
 int preprocessing();
@@ -67,18 +83,18 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 }
 
 
-/*void callback_match_pos(void* arg, struct aho_match_t* m)
+void callback_match_pos(void* arg, struct aho_match_t* m)
 {
     char* text = (char*)arg;
 
-    printf("match text:");
+    printf("match text in CPU:");
     for (unsigned int i = m->pos; i < (m->pos + m->len); i++)
     {
         printf("%c", text[i]);
     }
 
     printf(" (match id: %d position: %llu length: %d)\n", m->id, m->pos, m->len);
-}*/
+}
 
 trie_state State_transition[MAX_NUM_OF_STATES][SIGMA_SIZE]; // corespondes to goto function. row = current state, col = character in Σ, value = next state.
 trie_state State_supply[MAX_NUM_OF_STATES]; //corespondes to supply function. col = current state, value = supply state + is it final state.
@@ -90,17 +106,29 @@ int main()
     char searchphase[N];
     char pattern[NUM_OF_PATTERNS];
     
+#ifdef SIMPLE_EXAMPLE
+    strcpy_s(searchphase, "ahishers");
+#else
     // input
     FILE* fp;
 
     fp = fopen("Input.txt", "r");
     fgets(searchphase, N, fp);
     fclose(fp);
+#endif //SIMPLE_EXAMPLE
 
-    // Execute  the  preprocessing  phase  of  the  algorithm
+#ifdef DEBUG
+    printf("searchphase: %s\n\n", searchphase);
+    printf("P: { ");
+    for (int i = 0; i < NUM_OF_PATTERNS; i++)
+    {
+        printf("%s, ", P[i]);
+    }
+    printf("}\n\n");
+#endif
+
+    // Execute  the  preprocessing  phase  of  the  algorithm, represent tries using arrays
     preprocessing();
-
-    // Where  relevant  represent  tries  using  arrays
     
     // Allocate  one−dimensional and two−dimensional  arrays  in  the  global  memoryof  the  device  using  the  cudaMalloc() and cudaMallocPitch()functions  r e s p e c t i v e l y
     //allocateData();
@@ -124,26 +152,32 @@ int preprocessing()
     memset(State_output, 0, sizeof State_output);
     memset(State_transition, UINT32_MAX, sizeof State_transition);
 
+    // build transition function
     int states = 1;
 
     for (int i = 0; i < NUM_OF_PATTERNS; ++i)
     {
+        // calculate state transitions for each pattern
         const char* word = P[i];
         trie_state currentState = 0;
 
         for (int j = 0; j < strlen(word); j++)
         {
+            // calculate state transition for each charcter in the pattern
             int ch = word[j] - 'a';
             if (State_transition[currentState][ch] == UINT32_MAX) {
+                // if no transtion was yet set for this charcter in this state, then add a new state.
                 State_transition[currentState][ch] = states++;
             }
 
             currentState = State_transition[currentState][ch];
         }
 
+        // add word to output function
         State_output[currentState] |= (1 << i);
     }
 
+    // all transitions from initial state that were not handled - return to initial state.
     for (int ch = 0; ch < SIGMA_SIZE; ++ch)
     {
         if (State_transition[0][ch] == UINT32_MAX) {
@@ -151,58 +185,129 @@ int preprocessing()
         }
     }
 
+    // build supply function.
+    //implemented using breadth first search using a queue.
     memset(State_supply, UINT32_MAX, sizeof State_supply);
-    SIMPLEQ_HEAD(state_queue, _trie_state_queue_element) q = SIMPLEQ_HEAD_INITIALIZER(q);
+    struct queue_head_type head = SIMPLEQ_HEAD_INITIALIZER(head);
 
     for (int ch = 0; ch < SIGMA_SIZE; ++ch)
     {
+        // for every possible input
         if (State_transition[0][ch] != 0)
         {
-            trie_state_queue_element tsqe;
-            State_supply[State_transition[0][ch]] = 0;
-            tsqe.state = State_transition[0][ch];
-            SIMPLEQ_INSERT_TAIL(&q, &tsqe, entries);
+            // for nodes in a pattern in depth 1
+            _trie_state_queue_entry* tsqe;
 
-            //TODO continue this
+            // all depth 1 nodes supply transition is to state 0
+            // that is: failure after the first letter returns to the start state.
+            State_supply[State_transition[0][ch]] = 0;
+
+            // add node to queue for search later.
+            tsqe = (_trie_state_queue_entry*)malloc(sizeof(struct _trie_state_queue_entry));
+            tsqe->state = State_transition[0][ch];
+            SIMPLEQ_INSERT_TAIL(&head, tsqe, entries);
         }
     }
 
-    while (!SIMPLEQ_EMPTY(&q))
+    // now search over the states in the queue, breadth first
+    while (!SIMPLEQ_EMPTY(&head))
     {
-        trie_state state = SIMPLEQ_FIRST(&q)->state;
-        SIMPLEQ_REMOVE_HEAD(&q, entries);
+        // for each state in the queue, find supply function for all those
+        // characters for which transition function is not defined.
 
-        for (int ch = 0; ch <= SIGMA_SIZE; ++ch)
+        // remove state from the queue
+        trie_state state = SIMPLEQ_FIRST(&head)->state;
+        SIMPLEQ_REMOVE_HEAD(&head, entries);
+
+        for (int ch = 0; ch < SIGMA_SIZE; ++ch)
         {
-            if (State_transition[state][ch] != -1)
+            // for each possible input
+            if (State_transition[state][ch] != UINT32_MAX)
             {
-                trie_state failure = State_supply[state];
-                while (State_transition[failure][ch] == -1)
-                    failure = State_supply[failure];
+                // if a state transition is defined for this input at this state
 
-                failure = State_transition[failure][ch];
-                State_supply[State_transition[state][ch]] = failure;
+                // find currently defined supply for the state
+                trie_state supply = State_supply[state];
 
-                State_output[State_transition[state][ch]] |= State_output[failure];
+                // find the deepest supply defined for the current state. 
+                while (State_transition[supply][ch] == UINT32_MAX)
+                    // while the supply state has a defined state transition set supply to it's own supply
+                    supply = State_supply[supply];
 
-                trie_state_queue_element tsqe;
-                tsqe.state = State_transition[state][ch];
-                SIMPLEQ_INSERT_TAIL(&q, &tsqe, entries);
+                // finally set the supply to the transition for found state for the character.
+                supply = State_transition[supply][ch];
+                State_supply[State_transition[state][ch]] = supply;
+
+                // Merge output values 
+                State_output[State_transition[state][ch]] |= State_output[supply];
+
+                // add node to queue for search later.
+                _trie_state_queue_entry* tsqe;
+                tsqe = (_trie_state_queue_entry*)malloc(sizeof(struct _trie_state_queue_entry));
+                tsqe->state = State_transition[state][ch];
+                SIMPLEQ_INSERT_HEAD(&head, tsqe, entries);
             }
         }
     }
+
+#ifdef DEBUG
+    printf("State_transition:\n");
+
+    printf("state\\character: ");
+    for (int i = 0; i < SIGMA_SIZE; i++) {
+        printf("%2c ", 'a' + i);
+    }
+    printf("\n");
+
+    for (int i = 0; i < MAX_NUM_OF_STATES; i++) {
+        printf("%15d: ", i);
+        for (int j=0; j< SIGMA_SIZE; j++) {
+            int transition = State_transition[i][j];
+            (transition != -1)? printf("%2d ", transition): printf(" - ");
+        }
+        printf("\n");
+    }
+    printf("\n");
+
+    printf("State_supply:\n");
+    printf("state:  ");
+    for (int i = 0; i < MAX_NUM_OF_STATES; i++) {
+        printf("%2d ", i);
+    }
+    printf("\n");
+    printf("supply: ");
+    for (int i = 0; i < MAX_NUM_OF_STATES; i++) {
+        int supply = State_supply[i];
+        (supply != -1)? printf("%2d ", State_supply[i]): printf(" - ");
+    }
+    printf("\n\n");
+
+    printf("State_output:\n");
+    printf("state:  ");
+    for (int i = 0; i < MAX_NUM_OF_STATES; i++) {
+        printf("%2d ", i);
+    }
+    printf("\n");
+    printf("output: ");
+    for (int i = 0; i < MAX_NUM_OF_STATES; i++) {
+        int output = State_output[i];
+        (output != 0)? printf("%2d ", output): printf(" - ");
+    }
+    printf("\n\n");
+#endif
 
     return states;
 }
 
 
-int findNextState(int currentState, char nextInput)
+// find next state using transition and supply functions
+int findNextState(trie_state currentState, char nextInput)
 {
-    int result = currentState;
+    trie_state result = currentState;
     int ch = nextInput - 'a';
 
-    // If goto is not defined, use failure function 
-    while (State_transition[result][ch] == -1) {
+    // If transition is not defined, use supply function 
+    while (State_transition[result][ch] == UINT32_MAX) {
         result = State_supply[result];
     }
     return State_transition[result][ch];
@@ -262,6 +367,12 @@ void computeGold(const char* target, const char* P[NUM_OF_PATTERNS])
     //char* target = "Lorem ipsum dolor sit amet, consectetur brown elit. Proin vehicula brown egestas. Aliquam a dui tincidunt, elementum sapien in, ultricies lacus. Phasellus congue, sapien nec";
     aho_init(&aho);
 
+#ifdef SIMPLE_EXAMPLE
+    id[0] = aho_add_match_text(&aho, P[0], strlen(P[0]));
+    id[1] = aho_add_match_text(&aho, P[1], strlen(P[1]));
+    id[2] = aho_add_match_text(&aho, P[2], strlen(P[2]));
+    id[3] = aho_add_match_text(&aho, P[3], strlen(P[3]));
+#else
     id[0] = aho_add_match_text(&aho, P[0], strlen(P[0]));
     id[1] = aho_add_match_text(&aho, P[1], strlen(P[1]));
     id[2] = aho_add_match_text(&aho, P[2], strlen(P[2]));
@@ -272,9 +383,12 @@ void computeGold(const char* target, const char* P[NUM_OF_PATTERNS])
     id[7] = aho_add_match_text(&aho, P[7], strlen(P[7]));
     id[8] = aho_add_match_text(&aho, P[8], strlen(P[8]));
     id[9] = aho_add_match_text(&aho, P[9], strlen(P[9]));
+#endif
 
     aho_create_trie(&aho);
-    //aho_register_match_callback(&aho, callback_match_pos, (void*)searchphase);
+#ifdef DEBUG
+    aho_register_match_callback(&aho, callback_match_pos, (void*)target);
+#endif
 
     // use aho-corasick algorithm from https://github.com/morenice/ahocorasick
     start = clock();

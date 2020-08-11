@@ -4,9 +4,6 @@
     <CudaCompile Include="kernel.cu" />
   </ItemGroup>
   <ItemGroup>
-    <Text Include="Input.txt" />
-  </ItemGroup>
-  <ItemGroup>
     <Filter Include="include">
       <UniqueIdentifier>{a7613066-3a1c-4560-9be2-2e8aaa414386}</UniqueIdentifier>
     </Filter>
@@ -15,5 +12,11 @@
     <ClInclude Include="include\hoDll.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="simpleQ.h">
+      <Filter>include</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="Input.txt" />
   </ItemGroup>
 </Project>
