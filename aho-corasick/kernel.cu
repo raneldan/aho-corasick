@@ -15,8 +15,8 @@
 #define SIMPLE_EXAMPLE
 #define DEBUG
 
-#define NUM_BLOCKS 1
-#define BLOCK_DIM 1024
+#define NUM_BLOCKS 100
+#define BLOCK_DIM 1000
 #define N 1000000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
 #define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
 #define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + M - 1) // amount of characters proccessed by a thread
@@ -29,30 +29,32 @@
 //define list of patterns
 #ifdef SIMPLE_EXAMPLE
 #define NUM_OF_PATTERNS 4 // count of patterns
+#define LENGTH_OF_PATTERN 4 // const len of each pattern
 const char* P[NUM_OF_PATTERNS] = {
-    "he",
-    "she",
-    "his",
+    "hehe",
+    "shee",
+    "hiss",
     "hers"
 };
 // calculate maximum number of states, should be the sum of lengths of patterns.
-const size_t MAX_NUM_OF_STATES = 12;
+const size_t MAX_NUM_OF_STATES = 16;
 #else
 #define NUM_OF_PATTERNS 10 // count of patterns
+#define LENGTH_OF_PATTERN 6
 const char* P[NUM_OF_PATTERNS] = {
-    "consectetur",
-    "est",
-    "egestasaliquam",
-    "elementum",
-    "ultricies",
-    "vehicula",
+    "consec",
+    "estabc",
+    "egesta",
+    "elemen",
+    "ultric",
+    "vehicu",
     "tortor",
-    "inauditum",
+    "inaudi",
     "inquam" ,
-    "aut"
+    "autabc"
 };
 // calculate maximum number of states, should be the sum of lengths of patterns.
-const size_t MAX_NUM_OF_STATES = 79;
+const size_t MAX_NUM_OF_STATES = 60;
 #endif //SIMPLE_EXAMPLE
 
 // queue defenitions for calculation of supply function
@@ -65,9 +67,9 @@ SIMPLEQ_HEAD(queue_head_type, _trie_state_queue_entry) head;
 //function definitions
 int preprocessing();
 void allocateData();
-void computeOnDevice(char*, char*, const size_t, const size_t);
-__device__ void AhoCorasickKernel(char*, char*, unsigned int*);
-void calculateResult();
+int computeOnDevice(char*, const size_t);
+__global__ void AhoCorasickKernel(char*, trie_state*, size_t, trie_state*, trie_state*, unsigned int*);
+__device__ trie_state findNextState(trie_state*, size_t, trie_state*, trie_state, char);
 void computeGold(const char*, const char**);
 void compareWithGold();
 
@@ -131,12 +133,11 @@ int main()
     preprocessing();
     
     // Allocate  one−dimensional and two−dimensional  arrays  in  the  global  memoryof  the  device  using  the  cudaMalloc() and cudaMallocPitch()functions  r e s p e c t i v e l y
-    //allocateData();
 
-    //computeOnDevice();
+    int result = computeOnDevice(searchphase, N);
+
+    printf("GPU RESULT: %d \n", result);
     
-    //calculateResult();
-
     computeGold(searchphase, P);
 
     //compareWithGold();
@@ -301,16 +302,18 @@ int preprocessing()
 
 
 // find next state using transition and supply functions
-int findNextState(trie_state currentState, char nextInput)
+__device__ trie_state findNextState(trie_state* d_state_transition, size_t d_state_transition_pitch , trie_state* d_state_supply, trie_state currentState, char nextInput)
 {
     trie_state result = currentState;
     int ch = nextInput - 'a';
 
     // If transition is not defined, use supply function 
-    while (State_transition[result][ch] == UINT32_MAX) {
-        result = State_supply[result];
+    trie_state* element = (trie_state*)((char*)d_state_transition + result * d_state_transition_pitch) + ch;
+    while (*element == UINT32_MAX) {
+        result = d_state_supply[result];
+        element = (trie_state*)((char*)d_state_transition + result * d_state_transition_pitch) + ch;
     }
-    return State_transition[result][ch];
+    return *element;
 }
 
 void allocateData()
@@ -318,44 +321,73 @@ void allocateData()
     int i;
 }
 
-void computeOnDevice(char* h_searchphase, char* h_tries, const size_t phase_size, const size_t tries_size)
+int computeOnDevice(char* h_searchphase, const size_t phase_size)
 {
-    size_t out_size = NUM_BLOCKS * BLOCK_DIM;
+    const size_t OUT_SIZE = NUM_BLOCKS * BLOCK_DIM;
 
-    unsigned int* h_out; // number of matches per thread
+    // number of matches per thread
+    unsigned int* h_out; 
     char* d_searchphase;
-    char* d_tries;
+    trie_state* d_state_transition;
+    trie_state* d_state_supply;
+    trie_state* d_state_output;
     unsigned int* d_out;
+    size_t state_transition_pitch;
 
-    h_out = static_cast<unsigned int*>(malloc(out_size));
-    /*cudaMalloc(d_searchphase, phase_size);
-    cudaMalloc(d_tries, tries_size);
-    cudaMalloc(d_out, out_size);*/
+    h_out = static_cast<unsigned int*>(malloc(OUT_SIZE));
 
+    // using cudamallocPitch to prvent coallsing memory when allocating 2d memory
+    gpuErrchk(cudaMallocPitch<trie_state>(&d_state_transition, &state_transition_pitch, MAX_NUM_OF_STATES, SIGMA_SIZE));
+    cudaMalloc<trie_state>(&d_state_supply, MAX_NUM_OF_STATES);
+    cudaMalloc<trie_state>(&d_state_output, MAX_NUM_OF_STATES);
+    cudaMalloc<char>(&d_searchphase, phase_size);
+    cudaMalloc<unsigned int>(&d_out, OUT_SIZE);
+
+
+    cudaMemcpy2D(d_state_transition, state_transition_pitch, &State_transition, MAX_NUM_OF_STATES, MAX_NUM_OF_STATES, SIGMA_SIZE, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state_supply, State_supply, MAX_NUM_OF_STATES, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state_output, State_output, MAX_NUM_OF_STATES, cudaMemcpyHostToDevice);
     cudaMemcpy(d_searchphase, h_searchphase, phase_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_tries, h_tries, tries_size, cudaMemcpyHostToDevice);
 
-    //AhoCorasickKernel << NUM_BLOCKS, BLOCK_DIM >> (d_searchphase, d_tries, d_out);
+    AhoCorasickKernel <<<NUM_BLOCKS, BLOCK_DIM>>> (d_searchphase, d_state_transition, state_transition_pitch, d_state_supply, d_state_output ,d_out);
 
-    cudaMemcpy(h_out, d_out, out_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out, d_out, OUT_SIZE, cudaMemcpyDeviceToHost);
+
+    int final_result = 0;
+    for (int i = 0; i < OUT_SIZE; i++) {
+        final_result += h_out[i];
+    }
+
+    return (final_result);
 }
 
-__device__ void AhoCorasickKernel(char* d_searchphase, char* d_tries, unsigned int* d_out)
+__global__ void AhoCorasickKernel(char* d_searchphase, trie_state* d_state_transition, size_t state_transition_pitch,
+    trie_state* d_state_supply, trie_state* d_state_output, unsigned int* d_out)
 {
     size_t blockId = blockIdx.x;
     size_t threadId = threadIdx.x;
+
+    int results = 0;
     
     // define start and stop auxilary variables.
     size_t start, stop; //used to indicate the input string positions where the search phase begins and ends respectively
-    unsigned int overlap = NUM_OF_PATTERNS - 1; // To ensure the correctness of the results, m−1 overlapping characters are used per thread
+    unsigned int overlap = LENGTH_OF_PATTERN - 1; // To ensure the correctness of the results, m−1 overlapping characters are used per thread
     start = (blockId * N) / NUM_BLOCKS + (N * threadId) / (NUM_BLOCKS * blockDim.x);
     stop = start + N / (NUM_BLOCKS * blockDim.x) + overlap;
+    
+    trie_state currentState = 0;
 
-}
+    for (size_t i = start; i < stop; i++) {
+        currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply ,currentState, d_searchphase[i]);
 
-void calculateResult()
-{
-    int i;
+        if (d_state_output[currentState] == 0) {
+            continue;
+        }
+        
+        results++;
+    }
+
+    d_out[blockId * blockDim.x + threadId] = results;
 }
 
 void computeGold(const char* target, const char* P[NUM_OF_PATTERNS])
