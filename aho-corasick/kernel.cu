@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <inttypes.h>
 
 #include "simpleQ.h"
 #include "include/hoDll.h"
@@ -15,19 +16,18 @@
 //#define SIMPLE_EXAMPLE
 //#define DEBUG
 
+#define NUM_OF_SM 6
+#define S_MEM_PER_SM 48000
+
 #ifdef SIMPLE_EXAMPLE
 #define NUM_BLOCKS 1
 #define BLOCK_DIM 2
 #define N 8 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
 #else
-#define NUM_BLOCKS 10
-#define BLOCK_DIM 1000
-#define N 100000 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
+#define NUM_BLOCKS (NUM_OF_SM * 1)
+#define BLOCK_DIM 48
+#define N 99984 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM and 16
 #endif
-
-#define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
-#define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + M - 1) // amount of characters proccessed by a thread
-#define S_MEMSIZE *
 
 #define trie_state uint32_t
 
@@ -71,10 +71,20 @@ typedef	struct _trie_state_queue_entry {
 };
 SIMPLEQ_HEAD(queue_head_type, _trie_state_queue_entry) head;
 
+#define S_CHUNK (N / NUM_BLOCKS) // amount of characters in a chunk
+#define S_THREAD (N / (NUM_BLOCKS * BLOCK_DIM) + LENGTH_OF_PATTERN - 1) // amount of characters proccessed by a thread
+#define S_MEMSIZE (S_MEM_PER_SM * NUM_OF_SM / NUM_BLOCKS) // 48KB of shared memory per SM.
+
+
+#if S_THREAD > 128
+// when reading 128 bytes per transaction, if more then 128 bytes are needed, memory will coalese.
+#pragma message("Warning: S_THREAD bigger then 128, memory will coalese.")
+#endif
+
 //function definitions
 int preprocessing();
 unsigned int computeOnDevice(char*, const size_t);
-__global__ void AhoCorasickKernel(char*, trie_state*, size_t, trie_state*, trie_state*, unsigned int*);
+__global__ void AhoCorasickKernel(char*, size_t, trie_state*, size_t, trie_state*, trie_state*, unsigned int*);
 __device__ trie_state findNextState(trie_state*, size_t, trie_state*, trie_state, char);
 unsigned int computeGold(const char*, const char**);
 void compareWithGold(unsigned int, unsigned int);
@@ -111,17 +121,25 @@ trie_state State_output[MAX_NUM_OF_STATES]; //corespondes to output function. co
 
 int main()
 {
-    char searchphase[N+1]; // +1 for null
+    char* searchphase;
+    char searchphase_reference[N+1];
     char pattern[NUM_OF_PATTERNS];
     
+    gpuErrchk(cudaMallocHost((void**)&searchphase, N + 1 * sizeof(char))); // +1 for null
+
 #ifdef SIMPLE_EXAMPLE
     strcpy_s(searchphase, "ahhersis");
+    strcpy_s(searchphase_reference, "ahhersis");
 #else
     // input
     FILE* fp;
 
     fp = fopen("Input.txt", "r");
-    fgets(searchphase, N+1, fp);
+    fgets(searchphase, N + 1, fp);
+    fclose(fp);
+
+    fp = fopen("Input.txt", "r");
+    fgets(searchphase_reference, N + 1, fp);
     fclose(fp);
 #endif //SIMPLE_EXAMPLE
 
@@ -144,7 +162,7 @@ int main()
 
     printf("GPU RESULT: %d \n", result);
     
-    unsigned int reference = computeGold(searchphase, P);
+    unsigned int reference = computeGold(searchphase_reference, P);
 
     compareWithGold(result, reference);
 
@@ -376,11 +394,11 @@ unsigned int computeOnDevice(char* h_searchphase, const size_t phase_size)
         currentState = findNextStateHost(*State_transition, SIGMA_SIZE * sizeof(trie_state), State_supply, currentState, h_searchphase[i]);
 
         if (State_output[currentState] == 0) {
-            printf("(%d) see: %c\t move to: %d\n", i, h_searchphase[i], currentState);
+            //printf("(%d) see: %c\t move to: %d\n", i, h_searchphase[i], currentState);
             continue;
         }
 
-        printf("see: %c\t move to: %d\n", h_searchphase[i], currentState);
+        //printf("see: %c\t move to: %d\n", h_searchphase[i], currentState);
 
         results++;
     }
@@ -390,7 +408,7 @@ unsigned int computeOnDevice(char* h_searchphase, const size_t phase_size)
 
 
     gpuErrchk(cudaEventRecord(start));
-    AhoCorasickKernel <<<NUM_BLOCKS, BLOCK_DIM>>> (d_searchphase, d_state_transition, state_transition_pitch, d_state_supply, d_state_output ,d_out);
+    AhoCorasickKernel <<<NUM_BLOCKS, BLOCK_DIM>>> (d_searchphase, phase_size, d_state_transition, state_transition_pitch, d_state_supply, d_state_output ,d_out);
     gpuErrchk(cudaEventRecord(stop));
 
     gpuErrchk(cudaPeekAtLastError());
@@ -414,30 +432,78 @@ unsigned int computeOnDevice(char* h_searchphase, const size_t phase_size)
     return (final_result);
 }
 
-__global__ void AhoCorasickKernel(char* d_searchphase, trie_state* d_state_transition, size_t state_transition_pitch,
+__global__ void AhoCorasickKernel(char* d_searchphase, size_t phase_size, trie_state* d_state_transition, size_t state_transition_pitch,
     trie_state* d_state_supply, trie_state* d_state_output, unsigned int* d_out)
 {
     size_t blockId = blockIdx.x;
     size_t threadId = threadIdx.x;
 
+    __shared__ unsigned char s_searchphase[S_MEMSIZE];
+
     unsigned int results = 0;
     
     // define start and stop auxilary variables.
-    size_t start, stop; //used to indicate the input string positions where the search phase begins and ends respectively
+    size_t d_start, d_stop; //used to indicate the input string positions where the search phase begins and ends respectively
+    size_t s_start, s_stop;
     size_t overlap = LENGTH_OF_PATTERN - 1; // To ensure the correctness of the results, m−1 overlapping characters are used per thread
-    start = (blockId * N) / NUM_BLOCKS + (N * threadId) / (blockDim.x * NUM_BLOCKS);
-    stop = start + N / (NUM_BLOCKS * blockDim.x);
+    size_t block_start = (blockId * N) / NUM_BLOCKS;
+    size_t thread_start_offset = (N * threadId) / (blockDim.x * NUM_BLOCKS);
+    size_t thread_work_length = N / (NUM_BLOCKS * blockDim.x);
+    d_start = block_start + thread_start_offset;
+    d_stop = d_start + thread_work_length;
+    s_start = thread_start_offset;
+    s_stop = s_start + thread_work_length;
+
+    // prevent meory coalesceing and bandwith problems by reading N/ S_MEMSIZE chunks by each
+    // thread in the block into shared memory.
+    // increase global memory bandwidth utilization by reading from searchphase as a unit4 -
+    // reading a total of 16 bytes per word, and thus using a segment size of 128
+    uint4* uint4_text = reinterpret_cast<uint4*>(d_searchphase);
+#pragma unroll 16
+    for (size_t i = d_start, j = 0; i < d_stop; i+=16, j+=16)
+    {
+        uint4 uint4_var = uint4_text[i/16];
+        uchar4 uchar4_var0 = *reinterpret_cast<uchar4*>(&uint4_var.x);
+        uchar4 uchar4_var1 = *reinterpret_cast<uchar4*>(&uint4_var.y);
+        uchar4 uchar4_var2 = *reinterpret_cast<uchar4*>(&uint4_var.z);
+        uchar4 uchar4_var3 = *reinterpret_cast<uchar4*>(&uint4_var.w);
+        s_searchphase[s_start + j + 0] = uchar4_var0.x;
+        s_searchphase[s_start + j + 1] = uchar4_var0.y;
+        s_searchphase[s_start + j + 2] = uchar4_var0.z;
+        s_searchphase[s_start + j + 3] = uchar4_var0.w;
+        s_searchphase[s_start + j + 4] = uchar4_var1.x;
+        s_searchphase[s_start + j + 5] = uchar4_var1.y;
+        s_searchphase[s_start + j + 6] = uchar4_var1.z;
+        s_searchphase[s_start + j + 7] = uchar4_var1.w;
+        s_searchphase[s_start + j + 8] = uchar4_var2.x;
+        s_searchphase[s_start + j + 9] = uchar4_var2.y;
+        s_searchphase[s_start + j + 10] = uchar4_var2.z;
+        s_searchphase[s_start + j + 11] = uchar4_var2.w;
+        s_searchphase[s_start + j + 12] = uchar4_var3.x;
+        s_searchphase[s_start + j + 13] = uchar4_var3.y;
+        s_searchphase[s_start + j + 14] = uchar4_var3.z;
+        s_searchphase[s_start + j + 15] = uchar4_var3.w;
+        //s_searchphase[s_start + j] = d_searchphase[i];
+    }
+
+    //add last thread overlap
+    for (int i = 0; i < overlap && d_stop + i < phase_size; ++i)
+    {
+        s_searchphase[s_stop + i] = d_searchphase[d_stop + i];
+    }
+    __syncthreads();
+
 
     // use overlap to find patterns between 2 thread's blocks.
     // add overlap, only if you are not the last thread in the last block.
     // otherwise memory will move out of bound.
     // use multiplication by bool expresion to avoid thread divergence.
-    stop += overlap * (threadId != BLOCK_DIM - 1 || blockId != NUM_BLOCKS - 1);
+    //s_stop += overlap * (d_stop + overlap < phase_size);
     
     trie_state currentState = 0;
 
-    for (size_t i = start; i < stop; i++) {
-        currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply ,currentState, d_searchphase[i]);
+    for (size_t i = s_start; i < s_stop; i++) {
+        currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply ,currentState, s_searchphase[i]);
 
         if (d_state_output[currentState] == 0) {
             continue;
