@@ -14,11 +14,11 @@
 
 //options
 //#define SIMPLE_EXAMPLE
-#define DEBUG
+//#define DEBUG
 
 //optimizations
 //#define CAST_TO_INT
-#define GRANUALITY 1
+#define GRANUALITY 3
 
 //hardware
 #define NUM_OF_SM 6
@@ -72,7 +72,11 @@ const char* P[NUM_OF_PATTERNS] = {
 
 // calculate maximum number of states, should be the sum of lengths of patterns.
 #define MAX_NUM_OF_STATES (NUM_OF_PATTERNS * LENGTH_OF_PATTERN)
+
+// kernel indecies definitons
 #define THREAD_WORK_LENGTH ((N * GRANUALITY) / (NUM_BLOCKS * BLOCK_DIM))
+#define THREAD_START_STEP ((N * GRANUALITY) / (BLOCK_DIM * NUM_BLOCKS))
+#define BLOCK_START_STEP (N / NUM_BLOCKS)
 #define OVERLAP (LENGTH_OF_PATTERN - 1) // To ensure the correctness of the results, m−1 overlapping characters are used per thread
 
 // queue defenitions for calculation of supply function
@@ -446,7 +450,7 @@ unsigned int computeOnDevice(char* h_searchphase)
 
 
     gpuErrchk(cudaEventRecord(start));
-    AhoCorasickKernel <<<NUM_BLOCKS, BLOCK_DIM>>> (d_searchphase, d_state_transition, state_transition_pitch, d_state_supply, d_state_output ,d_out);
+    AhoCorasickKernel <<<NUM_BLOCKS, BLOCK_DIM / GRANUALITY >>> (d_searchphase, d_state_transition, state_transition_pitch, d_state_supply, d_state_output ,d_out);
     gpuErrchk(cudaEventRecord(stop));
 
     gpuErrchk(cudaPeekAtLastError());
@@ -491,11 +495,9 @@ __global__ void AhoCorasickKernel(char const * const d_searchphase, trie_state c
     // define start and stop auxilary variables.
     size_t d_start, d_stop; //used to indicate the input string positions where the search phase begins and ends respectively
     size_t s_start, s_stop;
-    size_t block_start = (blockId * N * GRANUALITY) / NUM_BLOCKS;
-    size_t thread_start_offset = (N * threadId * GRANUALITY) / (BLOCK_DIM * NUM_BLOCKS);
-    d_start = (block_start + thread_start_offset);
+    d_start = (blockId * BLOCK_START_STEP + threadId * THREAD_START_STEP);
     d_stop = d_start + THREAD_WORK_LENGTH;
-    s_start = thread_start_offset;
+    s_start = threadId * THREAD_START_STEP;
     s_stop = s_start + THREAD_WORK_LENGTH;
 
 #ifdef CAST_TO_INT
