@@ -18,7 +18,7 @@
 
 //optimizations
 //#define CAST_TO_INT
-#define GRANUALITY 3
+#define GRANUALITY 1
 
 //hardware
 #define NUM_OF_SM 6
@@ -544,27 +544,51 @@ __global__ void AhoCorasickKernel(char const * const d_searchphase, trie_state c
         s_searchphase[s_stop/16 + i + 3] = *reinterpret_cast<uchar4*>(&uint4_var.w);
     }*/
 #else
-    for (size_t i = d_start, j = 0; i < d_stop && i < N; ++i, ++j)
+    trie_state currentState = 0;
+
+    s_searchphase[s_start] = d_searchphase[d_start];
+    currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply, currentState, s_searchphase[s_start]);
+
+    if (d_state_output[currentState] != 0) {
+        results++;
+    }
+
+    for (size_t i = d_start+1, j = 1; i < d_stop && i < N; ++i, ++j)
     {
         s_searchphase[s_start + j] = d_searchphase[i];
+
+        currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply, currentState, s_searchphase[s_start + j]);
+
+        if (d_state_output[currentState] == 0) {
+            continue;
+        }
+
+        results++;
     }
 
     //add last thread overlap
     for (int i = 0; i < OVERLAP && d_stop + i < N; ++i)
     {
         s_searchphase[s_stop + i] = d_searchphase[d_stop + i];
+
+        currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply, currentState, s_searchphase[s_stop + i]);
+
+        if (d_state_output[currentState] == 0) {
+            continue;
+        }
+
+        results++;
     }
 #endif
-    __syncthreads();
+    //__syncthreads();
 
 
     // use overlap to find patterns between 2 thread's blocks.
     // add overlap, only if you are not the last thread in the last block.
     // otherwise memory will move out of bound.
     // use multiplication by bool expresion to avoid thread divergence.
-    s_stop += OVERLAP * (d_stop + OVERLAP < N);
+    //s_stop += OVERLAP * (d_stop + OVERLAP < N);
     
-    trie_state currentState = 0;
 
 
 #ifdef CAST_TO_INT
@@ -605,7 +629,7 @@ __global__ void AhoCorasickKernel(char const * const d_searchphase, trie_state c
 
     d_out[blockId * blockDim.x + threadId] = results;
 #else
-#pragma unroll 4
+/*#pragma unroll 4
     for (size_t i = s_start; i < s_stop && i < N; i++) {
         currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply ,currentState, s_searchphase[i]);
 
@@ -614,7 +638,7 @@ __global__ void AhoCorasickKernel(char const * const d_searchphase, trie_state c
         }
         
         results++;
-    }
+    }*/
 
     d_out[blockId * blockDim.x + threadId] = results;
 #endif
