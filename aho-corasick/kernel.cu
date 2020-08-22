@@ -14,7 +14,7 @@
 
 //options
 //#define SIMPLE_EXAMPLE
-//#define DEBUG
+#define DEBUG
 
 //optimizations
 //#define CAST_TO_INT
