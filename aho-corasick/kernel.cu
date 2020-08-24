@@ -17,7 +17,7 @@
 //#define DEBUG
 
 //optimizations
-#define CAST_TO_INT
+//#define CAST_TO_INT
 #define LOOP_UNROLL 1
 #define GRANUALITY 1
 
@@ -33,8 +33,8 @@
 #define N 8 // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM
 #else
 #define NUM_BLOCKS_FACTOR 10
-#define BLOCK_DIM_FACTOR 8
-#define N_FACTOR 5
+#define BLOCK_DIM_FACTOR 10
+#define N_FACTOR 10
 #define NUM_BLOCKS (NUM_OF_SM * NUM_BLOCKS_FACTOR)
 #define BLOCK_DIM (8 * BLOCK_DIM_FACTOR) // NUM_BLOCKS * BLOCK_DIM should be devisable by 16, so BLOCK_DIM should be a factor of 8 for NUM_OF_SM=6.
 #define N (16 * NUM_BLOCKS * BLOCK_DIM * N_FACTOR) // size of search string. devisable by NUM_BLOCKS and by BLOCK_DIM. must be a factor of 16.
@@ -56,7 +56,7 @@ const char* P[NUM_OF_PATTERNS] = {
 };
 #else
 #define NUM_OF_PATTERNS 10 // count of patterns
-#define LENGTH_OF_PATTERN 10
+#define LENGTH_OF_PATTERN 6
 const char* P[NUM_OF_PATTERNS] = {
     "loremi",
     "uoinse",
@@ -484,12 +484,6 @@ unsigned int computeOnDevice(char* h_searchphase)
     gpuErrchk(cudaEventSynchronize(stop));
     gpuErrchk(cudaEventElapsedTime(&milliseconds, start, stop));
     printf("Execution time GPU (sec): %f \n", milliseconds / 1000);
-
-    /*gpuErrchk(cudaFree(d_searchphase));
-    gpuErrchk(cudaFree(d_state_transition));
-    gpuErrchk(cudaFree(d_state_supply));
-    gpuErrchk(cudaFree(d_state_output));
-    gpuErrchk(cudaFree(d_out));*/
 
     gpuErrchk(cudaDeviceReset());
 
