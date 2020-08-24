@@ -18,6 +18,7 @@
 
 //optimizations
 #define CAST_TO_INT
+#define LOOP_UNROLL 1
 #define GRANUALITY 1
 
 //hardware
@@ -55,18 +56,18 @@ const char* P[NUM_OF_PATTERNS] = {
 };
 #else
 #define NUM_OF_PATTERNS 10 // count of patterns
-#define LENGTH_OF_PATTERN 5
+#define LENGTH_OF_PATTERN 10
 const char* P[NUM_OF_PATTERNS] = {
-    "conse",
-    "rebue",
-    "mipsu",
-    "orsit",
-    "ultri",
-    "vehic",
-    "torto",
-    "inaud",
-    "inqua",
-    "autab"
+    "loremi",
+    "uoinse",
+    "tureiq",
+    "idemus",
+    "setinu",
+    "umquod",
+    "olorsi",
+    "setlae",
+    "nifice",
+    "sinkak"
 };
 #endif //SIMPLE_EXAMPLE
 
@@ -515,7 +516,7 @@ __global__ void AhoCorasickKernel(uint4* uint4_text, trie_state const* const d_s
     s_stop = s_start + THREAD_WORK_LENGTH + OVERLAP;
     trie_state currentState = 0;
 
-#pragma unroll 1
+#pragma unroll 16
     for (size_t i = d_start; i < d_stop && i < N; i += 16)
     {
         uint4* s_uint4_text = reinterpret_cast<uint4*>(&s_searchphase[s_start - d_start + i]);
@@ -523,7 +524,7 @@ __global__ void AhoCorasickKernel(uint4* uint4_text, trie_state const* const d_s
     }
     __syncthreads();
     
-#pragma unroll 1
+#pragma unroll LOOP_UNROLL
     for (size_t i = s_start; i < s_stop && i < BLOCK_SIZE && i < N; i++)
     {
         currentState = findNextState(d_state_transition, state_transition_pitch, d_state_supply, currentState, s_searchphase[i]);
@@ -555,6 +556,7 @@ __global__ void AhoCorasickKernel(char* d_searchphase, trie_state const* const d
     s_stop = s_start + THREAD_WORK_LENGTH;
     trie_state currentState = 0;
 
+#pragma unroll LOOP_UNROLL
     for (size_t i = d_start, j = 0; i < d_stop + OVERLAP && i < N; ++i, ++j)
     {
         trie_state next_char = d_searchphase[i];
